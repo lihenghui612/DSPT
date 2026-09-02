@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Training outputs
+checkpoints/
+results/
+
+# Data arrays are regenerated from the raw downloads, never committed
+data/**/*.npy
+
+# MOMENT backbone weights are downloaded separately (see README)
+models/*
+!models/.gitkeep
+
+# OS
+.DS_Store
