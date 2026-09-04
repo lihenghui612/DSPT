@@ -49,11 +49,11 @@ class Config:
 
     # ------------------------------------------------------------------ DSPT
     m: int = 9                        # task-guidance prompt length
-    r: int = 5                        # rank of the calibration matrices
+    r: int = 5                        # rank of the sensor-embedding update matrices
     prompt_len: int = 15              # prompt length l of standard prompt tuning
     dual_lr: bool = True
-    alpha1: float = 1e-3              # learning rate of the soft prompt
-    alpha2: float = 1e-4              # learning rate of the low-rank matrices
+    alpha1: float = 1e-3              # λ1: task-guidance prompt learning rate
+    alpha2: float = 1e-4              # λ2: sensor-embedding matrix learning rate
 
     # ------------------------------------------------------------- baselines
     adapter_bottleneck: int = 24

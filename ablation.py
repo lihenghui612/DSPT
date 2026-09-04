@@ -2,8 +2,8 @@
 
     prompt_len   sensitivity of standard prompt tuning to the prompt length l
     m            task-guidance length m, with r solved from the budget constraint
-    lr           grid search over the two learning rates
-    placement    where to inject the low-rank calibration matrices
+    lr           grid search over λ1 (prompt) and λ2 (sensor-embedding matrices)
+    placement    where to inject the low-rank sensor-embedding update
 
 Examples
 --------
@@ -33,6 +33,14 @@ def summarise(runs, label, override):
     return {
         "label": label,
         "override": override,
+        "runs": [
+            {
+                "seed": int(run["seed"]),
+                "accuracy": float(run["test_acc"]),
+                "macro_f1": float(run["test"]["macro_f1"]),
+            }
+            for run in runs
+        ],
         "acc_mean": float(acc.mean()),
         "acc_std": sample_std(acc),
         "f1_mean": float(f1.mean()),
@@ -57,10 +65,10 @@ def settings_for(study, prompt_len):
         for m in (0, 3, 6, 9, 12, 15):
             r = rank_for(m, prompt_len)
             if m == 0:
-                # Calibration only, without task guidance.
+                # Sensor-embedding adaptation only, without task guidance.
                 settings.append((f"m=0, r={r}", {"finetune_type": "dspt", "m": 0, "r": r}))
             elif r == 0:
-                # No budget left for calibration; reduces to standard prompt tuning.
+                # No budget left for sensor-embedding adaptation; reduces to standard PT.
                 settings.append((f"m={m}, r=0", {"finetune_type": "std_pt", "prompt_len": m}))
             else:
                 settings.append((f"m={m}, r={r}", {"finetune_type": "dspt", "m": m, "r": r}))
@@ -136,4 +144,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

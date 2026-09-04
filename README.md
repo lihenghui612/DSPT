@@ -54,12 +54,18 @@ Download them from the original sources:
 | HHAR | https://archive.ics.uci.edu/dataset/344/heterogeneity+activity+recognition |
 | PAMAP2 | https://archive.ics.uci.edu/dataset/231/pamap2+physical+activity+monitoring |
 
-[`data/README.md`](data/README.md) specifies the array interface, windowing rules,
-in-domain evaluation protocol, few-shot support-set construction, and the metadata
-required for the HHAR domain-exclusive experiments. Dataset-specific raw-file
-parsing is kept outside this repository because the source formats and redistribution
-terms are controlled by the dataset providers; the training code begins from the
-documented NumPy array interface.
+[`data/README.md`](data/README.md) specifies the array interface, the split-before-
+windowing protocol, few-shot support-set construction, and the metadata required for
+the HHAR domain-exclusive experiments. The repository includes a generic temporal
+partition builder that records the raw boundaries used to create each window.
+
+After converting a dataset to the documented per-reading arrays, create the canonical
+partitions before sampling the few-shot supports:
+
+```bash
+python data/build_temporal_partitions.py \
+  --input_root data/HHAR/continuous --output_root data/HHAR
+```
 
 After preparing the fixed train/validation/test arrays, construct the three paired
 few-shot support sets used by all methods:
@@ -106,8 +112,9 @@ Available adaptation strategies are:
 | `variant_b` | Placement variant B: `[P ; H] + AB` |
 
 Defaults follow the paper: 200 epochs, Adam, batch size 8, a cosine learning-rate
-schedule, `m=9`, `r=5`, `alpha1=1e-3` for the prompt, and `alpha2=1e-4` for the
-low-rank matrices. The best epoch is selected using validation accuracy, after which
+schedule, `m=9`, `r=5`, `alpha1=1e-3` (the paper's λ₁) for the task-guidance prompt,
+and `alpha2=1e-4` (λ₂) for the low-rank sensor-embedding matrices. The best epoch is
+selected using validation accuracy, after which
 the held-out test set is evaluated once. A JSON record containing the configuration,
 per-seed metrics, mean, and sample standard deviation is written to `results/`.
 
@@ -146,9 +153,22 @@ python ablation.py --study m          --dataset MotionSense --shot 5-shot
 python ablation.py --study lr         --dataset MotionSense --shot 5-shot
 python ablation.py --study placement  --dataset MotionSense --shot 5-shot
 
-python efficiency.py --dataset MotionSense --batch_size 8
-python efficiency.py --dataset MotionSense --batch_size 1 --device cpu
+python plot_ablation_curves.py \
+  results/ablation/MotionSense_5-shot_prompt_len.json \
+  results/ablation/MotionSense_5-shot_prompt_len.pdf --x l
+python plot_ablation_curves.py \
+  results/ablation/MotionSense_5-shot_m.json \
+  results/ablation/MotionSense_5-shot_m.pdf --x m
+
+# Local model-compute timing on 2,000 held-out windows after 20 warm-up passes.
+python efficiency.py --dataset HHAR --batch_size 1 --n_iter 2000 --device cpu
 ```
+
+Each ablation JSON retains the per-seed measurements as well as `acc_mean` and the
+sample-standard-deviation field `acc_std`. The curve plotter reads those measured
+statistics and draws a ±1-SD shaded band. The timing script samples real held-out
+windows from `data/<dataset>/x_test.npy`, reports the aggregate mean and sample
+standard deviation of model computation, and does not time data loading.
 
 To generate t-SNE plots, first save the trainable tensors for each method:
 
@@ -195,9 +215,11 @@ model.py                     DSPT, baseline modules, and MOMENT wrapper
 train.py                     Training, evaluation, and paired-run driver
 ablation.py                  Prompt, budget, learning-rate, and placement studies
 efficiency.py                Latency and throughput measurement
+plot_ablation_curves.py      Mean curves with measured ±1-SD shading
 tsne.py                      Feature visualization
 data/README.md               Data interface and protocol
 data/build_splits.py         Paired few-shot support-set generation
+data/build_temporal_partitions.py  Split-before-windowing partition generation
 data/build_group_splits.py   HHAR domain-exclusive fold generation
 ```
 
