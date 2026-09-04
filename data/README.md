@@ -37,46 +37,59 @@ data/
 `[0, num_classes)`. `float32` and `int64` are recommended. The loader casts arrays to
 the appropriate PyTorch types at runtime.
 
-## Windowing and in-domain partitions
+## Temporal partitioning and windowing
 
-1. Assemble sensor axes in one fixed, documented channel order.
-2. Segment each continuous recording into windows of 500 readings with a stride of
-   250 readings (50% overlap).
-3. Discard windows that cross an activity transition.
-4. Perform the sample-level in-domain split described in the paper: reserve 20% as
-   the held-out test partition and reserve a disjoint validation subset from the
-   remaining training portion. Use one fixed set of root partitions for every method.
-5. Do not use validation or test samples for gradient updates or few-shot support
-   construction.
+The canonical benchmark partitions each continuous recording before generating any
+windows. This ordering prevents adjacent overlapping windows from sharing raw readings
+across the training, validation, and test sets.
+
+1. Assemble sensor axes in one fixed, documented channel order and retain the original
+   temporal order within every continuous recording.
+2. Split each recording chronologically: the final 20% is held out for testing. From
+   the preceding 80% source interval, reserve its final 20% for validation.
+3. Generate windows independently inside each temporal partition. Each window contains
+   500 readings and the stride is 250 readings (50% overlap).
+4. Discard windows that cross an activity transition. Because windowing is performed
+   separately inside each partition, a window can never cross a partition boundary.
+5. Use one fixed set of root partitions for every method. Validation and test samples
+   are never used for gradient updates or few-shot support construction.
 6. Store raw sensor values. MOMENT applies reversible instance normalization inside
    the model.
 
-Because splitting occurs at the window level in this in-domain benchmark, windows
-from the same subject or recording session can occur in different root partitions,
-and adjacent overlapping windows can retain temporal correlation. These results must
-not be described as unseen-subject, unseen-session, or unseen-device generalization.
+The same participant or recording session may contribute temporally disjoint portions
+to more than one partition, so this remains an in-domain evaluation. However, the
+partitions share neither raw timestamps nor overlapping windows. Unseen-device and
+unseen-subject generalization are evaluated separately by the HHAR group-exclusive
+protocols below.
 
-Reference windowing logic:
+Prepare per-reading continuous arrays under, for example,
+`data/HHAR/continuous/`:
 
-```python
-import numpy as np
-
-def sliding_windows(x, y, win_len=500, stride=250):
-    """x: [T, C] sensor stream; y: [T] per-reading activity labels."""
-    windows, labels = [], []
-    for start in range(0, len(x) - win_len + 1, stride):
-        segment_y = y[start:start + win_len]
-        if not np.all(segment_y == segment_y[0]):
-            continue
-        windows.append(x[start:start + win_len])
-        labels.append(segment_y[0])
-    return np.asarray(windows), np.asarray(labels)
+```text
+x.npy           [T, C] raw readings in recording-time order
+y.npy           [T] per-reading activity labels
+recording.npy   [T] continuous-recording identifiers
 ```
+
+Then create the canonical root arrays and an auditable temporal-boundary manifest:
+
+```bash
+python data/build_temporal_partitions.py \
+  --input_root data/HHAR/continuous \
+  --output_root data/HHAR \
+  --win_len 500 --stride 250 \
+  --test_fraction 0.2 --validation_fraction 0.2
+```
+
+Repeat the command for MotionSense and PAMAP2. The script writes window-level recording
+identifiers and raw start/end indices in addition to the six canonical arrays. It also
+writes `temporal_split_manifest.json`, which records the temporal boundary of every
+partition and certifies that splitting occurred before window generation.
 
 ## Paired few-shot support sets
 
-Generate the three class-balanced support-set draws after the fixed root partitions
-have been prepared:
+Generate the three class-balanced support-set draws after the boundary-aware root
+partitions have been prepared:
 
 ```bash
 python data/build_splits.py \

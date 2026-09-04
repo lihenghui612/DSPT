@@ -21,7 +21,7 @@ SHOTS = (1, 5, 10, 20)
 SEEDS = (0, 1, 2)
 
 
-def _validate_root(root):
+def _validate_root(root, allow_unverified_root=False):
     required = (
         "x_train.npy", "y_train.npy", "x_valid.npy", "y_valid.npy",
         "x_test.npy", "y_test.npy",
@@ -32,11 +32,27 @@ def _validate_root(root):
             f"{root} is missing {missing}. Prepare the canonical arrays described "
             "in data/README.md before building few-shot supports."
         )
+    manifest_path = os.path.join(root, "temporal_split_manifest.json")
+    if allow_unverified_root:
+        return
+    if not os.path.isfile(manifest_path):
+        raise FileNotFoundError(
+            f"{root} has no temporal_split_manifest.json. Build the canonical arrays "
+            "with data/build_temporal_partitions.py, or pass --allow_unverified_root "
+            "only for a deliberately external partition whose provenance you verified."
+        )
+    with open(manifest_path, encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    if not (manifest.get("split_before_windowing")
+            and manifest.get("raw_partitions_are_disjoint")):
+        raise ValueError(
+            f"{manifest_path} does not record a disjoint split before windowing"
+        )
 
 
-def build(base_path, dataset, shots, seeds):
+def build(base_path, dataset, shots, seeds, allow_unverified_root=False):
     root = os.path.join(base_path, dataset)
-    _validate_root(root)
+    _validate_root(root, allow_unverified_root)
 
     x = np.load(os.path.join(root, "x_train.npy"), mmap_mode="r")
     y = np.load(os.path.join(root, "y_train.npy"))
@@ -102,6 +118,10 @@ if __name__ == "__main__":
     parser.add_argument("--datasets", nargs="+", default=list(DATASETS), choices=DATASETS)
     parser.add_argument("--shots", type=int, nargs="+", default=list(SHOTS))
     parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
+    parser.add_argument(
+        "--allow_unverified_root", action="store_true",
+        help="accept externally prepared root arrays without the temporal manifest",
+    )
     args = parser.parse_args()
     for dataset_name in args.datasets:
-        build(args.base, dataset_name, args.shots, args.seeds)
+        build(args.base, dataset_name, args.shots, args.seeds, args.allow_unverified_root)
