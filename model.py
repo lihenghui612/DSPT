@@ -3,7 +3,7 @@
 The MOMENT backbone and its patch embedder stay frozen. Adaptation happens in the
 patch-embedding space:
 
-    calibration branch   H' = H + AB          A in R^{s x r},  B in R^{r x d}
+    embedding branch     H' = H + AB          A in R^{s x r},  B in R^{r x d}
     guidance branch      Z  = [P ; H']        P in R^{m x d}
 
 with the prompt length ``m`` and the rank ``r`` chosen so that ``m * d + (s + d) * r``
@@ -18,14 +18,14 @@ from momentfm.utils.masking import Masking
 
 
 class DSPTModule(nn.Module):
-    """Decomposed prompt with an optional low-rank calibration term.
+    """Decomposed prompt with an optional low-rank embedding update.
 
     ``variant`` selects how the two components are combined:
 
         std_pt      [P ; H]           prompt only, length ``m``
-        variant_a   [P + AB ; H]      calibration applied to the prompt
-        variant_b   [P ; H] + AB      calibration applied to the whole sequence
-        dspt        [P ; H + AB]      calibration applied to the patch embeddings
+        variant_a   [P + AB ; H]      update applied to the prompt
+        variant_b   [P ; H] + AB      update applied to the whole sequence
+        dspt        [P ; H + AB]      update applied to the patch embeddings
     """
 
     LOW_RANK_ROWS = {"variant_a": "m", "variant_b": "m+s", "dspt": "s"}
@@ -46,7 +46,7 @@ class DSPTModule(nn.Module):
             self.lora_B = None
         else:
             rows = {"variant_a": m, "variant_b": m + n_patches, "dspt": n_patches}[variant]
-            # A is drawn from a Gaussian and B is zeroed, so the calibration term
+            # A is drawn from a Gaussian and B is zeroed, so the low-rank update
             # vanishes at initialisation.
             self.lora_A = nn.Parameter(torch.empty(rows, r))
             self.lora_B = nn.Parameter(torch.zeros(r, d_model))
@@ -128,7 +128,7 @@ class MomentHAR(nn.Module):
     """MOMENT backbone with a selectable fine-tuning strategy.
 
     The classification forward pass of ``momentfm`` is reproduced here so that the
-    prompt and the calibration term can be inserted between the frozen patch
+    prompt and the low-rank update can be inserted between the frozen patch
     embedder and the frozen transformer encoder.
     """
 
@@ -278,6 +278,5 @@ class MomentHAR(nn.Module):
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.parameters())
         return trainable, total
-
 
 

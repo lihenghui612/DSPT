@@ -59,16 +59,16 @@ windowing protocol, few-shot support-set construction, and the metadata required
 the HHAR domain-exclusive experiments. The repository includes a generic temporal
 partition builder that records the raw boundaries used to create each window.
 
-After converting a dataset to the documented per-reading arrays, create the canonical
-partitions before sampling the few-shot supports:
+After converting a dataset to the documented per-reading arrays, create the fixed
+source/test partitions before sampling the few-shot supports:
 
 ```bash
 python data/build_temporal_partitions.py \
   --input_root data/HHAR/continuous --output_root data/HHAR
 ```
 
-After preparing the fixed train/validation/test arrays, construct the three paired
-few-shot support sets used by all methods:
+After preparing the fixed source/test arrays, construct the three paired few-shot
+support/validation splits used by all methods:
 
 ```bash
 python data/build_splits.py \
@@ -78,8 +78,9 @@ python data/build_splits.py \
 ```
 
 This produces paths such as `data/HHAR/5-shot/seed-0/`. For a given seed, every
-method reads exactly the same support indices. Across seeds, the support set is
-resampled independently.
+method reads exactly the same support indices, and all remaining source indices form
+that run's validation set. Across seeds, the support set is resampled independently;
+the held-out test partition never changes.
 
 ## Training
 
@@ -94,9 +95,9 @@ python train.py \
 ```
 
 For few-shot experiments, each value passed to `--seeds` controls both the support
-set and the optimization randomness. For fully supervised experiments, the training
-partition is fixed and the values control optimization randomness only. Reported
-deviations are sample standard deviations (`ddof=1`).
+set and the optimization randomness. For fully supervised experiments, the complete
+source partition is fixed and the values control optimization randomness only.
+Reported deviations are sample standard deviations across runs.
 
 Available adaptation strategies are:
 
@@ -114,9 +115,11 @@ Available adaptation strategies are:
 Defaults follow the paper: 200 epochs, Adam, batch size 8, a cosine learning-rate
 schedule, `m=9`, `r=5`, `alpha1=1e-3` (the paper's λ₁) for the task-guidance prompt,
 and `alpha2=1e-4` (λ₂) for the low-rank sensor-embedding matrices. The best epoch is
-selected using validation accuracy, after which
-the held-out test set is evaluated once. A JSON record containing the configuration,
-per-seed metrics, mean, and sample standard deviation is written to `results/`.
+selected using the run-specific validation set in few-shot experiments. Fully
+supervised runs use the complete source partition for the configured number of
+epochs. In both settings, the held-out test set is evaluated once. A JSON record
+containing the configuration, per-seed metrics, mean, and sample standard deviation
+is written to `results/`.
 
 Frequently used options:
 

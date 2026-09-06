@@ -27,31 +27,45 @@ from model import MomentHAR
 class WindowDataset(Dataset):
     """Sliding windows stored as ``x_<split>.npy`` / ``y_<split>.npy``.
 
-    Splits that are absent from a few-shot directory are read from the dataset root,
-    so the test arrays are stored only once.
+    A few-shot directory may contain either materialized arrays or index files. For
+    the main protocol, ``train_indices.npy`` and ``valid_indices.npy`` select the
+    run-specific support and complementary validation subsets from the fixed source
+    arrays at the dataset root. Test arrays are stored only once at the root.
     """
 
     def __init__(self, path, split, dataset_root=None):
-        candidates = [path]
-        if dataset_root is not None and dataset_root not in candidates:
-            candidates.append(dataset_root)
+        dataset_root = dataset_root or path
+        index_path = os.path.join(path, f"{split}_indices.npy")
+        x_path = os.path.join(path, f"x_{split}.npy")
+        y_path = os.path.join(path, f"y_{split}.npy")
 
-        selected = None
-        for candidate in candidates:
-            x_path = os.path.join(candidate, f"x_{split}.npy")
-            y_path = os.path.join(candidate, f"y_{split}.npy")
-            if os.path.isfile(x_path) and os.path.isfile(y_path):
-                selected = (x_path, y_path)
-                break
+        # Prefer the current index-based protocol over any materialized arrays left
+        # by an earlier preparation run in the same directory.
+        if os.path.isfile(index_path):
+            if split not in ("train", "valid"):
+                raise ValueError(f"indexed split '{split}' is not supported")
+            base_x = np.load(os.path.join(dataset_root, "x_train.npy"), mmap_mode="r")
+            base_y = np.load(os.path.join(dataset_root, "y_train.npy"), mmap_mode="r")
+            indices = np.load(index_path)
+            if indices.ndim != 1 or not np.issubdtype(indices.dtype, np.integer):
+                raise ValueError(f"{index_path} must contain a one-dimensional integer array")
+            if indices.size and (indices.min() < 0 or indices.max() >= len(base_y)):
+                raise IndexError(f"{index_path} contains an out-of-range source index")
+            x, y = np.asarray(base_x[indices]), np.asarray(base_y[indices])
+        elif os.path.isfile(x_path) and os.path.isfile(y_path):
+            x, y = np.load(x_path), np.load(y_path)
+        else:
+            root_x = os.path.join(dataset_root, f"x_{split}.npy")
+            root_y = os.path.join(dataset_root, f"y_{split}.npy")
+            allow_root_fallback = path == dataset_root or split in ("valid", "test")
+            if not (allow_root_fallback and os.path.isfile(root_x) and os.path.isfile(root_y)):
+                raise FileNotFoundError(
+                    f"Could not resolve split '{split}' from {path} or {dataset_root}"
+                )
+            x, y = np.load(root_x), np.load(root_y)
 
-        if selected is None:
-            searched = ", ".join(candidates)
-            raise FileNotFoundError(
-                f"Could not find x_{split}.npy and y_{split}.npy in: {searched}"
-            )
-
-        self.x = torch.from_numpy(np.load(selected[0])).float()
-        self.y = torch.from_numpy(np.load(selected[1])).long()
+        self.x = torch.from_numpy(np.ascontiguousarray(x)).float()
+        self.y = torch.from_numpy(np.ascontiguousarray(y)).long()
         if len(self.x) != len(self.y):
             raise ValueError(f"Mismatched x/y lengths for split '{split}'")
 
@@ -134,20 +148,25 @@ def evaluate(model, loader, device, detailed=False):
 def run_once(cfg, seed, verbose=True):
     """Train one model and evaluate it on the test split.
 
-    The best epoch is selected on the validation split; the test split is evaluated
-    once, with the selected weights.
+    For few-shot runs, the best epoch is selected on the run-specific complementary
+    validation split. Fully supervised runs use all source windows for the configured
+    number of epochs. In both cases, the held-out test split is evaluated once.
     """
     set_seed(seed)
     device = torch.device(cfg.device)
 
     run_data_path, dataset_root = data_paths_for_run(cfg, seed)
     train_set = WindowDataset(run_data_path, "train", dataset_root)
-    valid_set = WindowDataset(run_data_path, "valid", dataset_root)
+    valid_set = None if cfg.shot == "full" else WindowDataset(
+        run_data_path, "valid", dataset_root
+    )
     test_set = WindowDataset(run_data_path, "test", dataset_root)
 
     loader_kwargs = dict(num_workers=cfg.num_workers, pin_memory=True)
     train_loader = DataLoader(train_set, batch_size=cfg.batch_size, shuffle=True, **loader_kwargs)
-    valid_loader = DataLoader(valid_set, batch_size=64, shuffle=False, **loader_kwargs)
+    valid_loader = None if valid_set is None else DataLoader(
+        valid_set, batch_size=64, shuffle=False, **loader_kwargs
+    )
     test_loader = DataLoader(test_set, batch_size=64, shuffle=False, **loader_kwargs)
 
     model = MomentHAR(cfg).to(device)
@@ -155,7 +174,8 @@ def run_once(cfg, seed, verbose=True):
     trainable, total = model.count()
 
     if verbose:
-        print(f"  samples: train {len(train_set)} | valid {len(valid_set)} | test {len(test_set)}")
+        valid_count = "not used" if valid_set is None else str(len(valid_set))
+        print(f"  samples: train {len(train_set)} | valid {valid_count} | test {len(test_set)}")
         print(f"  trainable {trainable:,} ({trainable / 1e6:.4f}M) of {total:,}")
         if model.dspt is not None:
             print(f"  input-space parameters {model.dspt.n_params():,} "
@@ -180,24 +200,39 @@ def run_once(cfg, seed, verbose=True):
             epoch_loss += loss.item()
         scheduler.step()
 
-        valid_acc = evaluate(model, valid_loader, device)
-        if valid_acc > best_valid:
-            best_valid, best_epoch = valid_acc, epoch + 1
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        valid_acc = None
+        if valid_loader is not None:
+            valid_acc = evaluate(model, valid_loader, device)
+            if valid_acc > best_valid:
+                best_valid, best_epoch = valid_acc, epoch + 1
+                best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
 
         if verbose and (epoch + 1) % 20 == 0:
+            status = (
+                f"valid {valid_acc:.2f} (best {best_valid:.2f} @ {best_epoch})"
+                if valid_acc is not None else "full-source training"
+            )
             print(f"  epoch {epoch + 1:3d}/{cfg.num_epochs} "
-                  f"loss {epoch_loss / len(train_loader):.4f} valid {valid_acc:.2f} "
-                  f"(best {best_valid:.2f} @ {best_epoch})")
+                  f"loss {epoch_loss / len(train_loader):.4f} {status}")
+
+    if valid_loader is None:
+        best_epoch = cfg.num_epochs
+        best_valid = None
+        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
     model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
     test = evaluate(model, test_loader, device, detailed=True)
     minutes = (time.time() - started) / 60
 
     if verbose:
-        print(f"  seed {seed}: valid {best_valid:.2f} (epoch {best_epoch}) | "
-              f"test accuracy {test['accuracy']:.2f} macro-F1 {test['macro_f1']:.2f} | "
-              f"{minutes:.1f} min")
+        selection = (
+            f"valid {best_valid:.2f} (epoch {best_epoch})"
+            if best_valid is not None else f"final epoch {best_epoch}"
+        )
+        print(f"  seed {seed}: {selection} | test accuracy {test['accuracy']:.2f} "
+              f"macro-F1 {test['macro_f1']:.2f} | {minutes:.1f} min")
 
     if cfg.save_ckpt:
         os.makedirs(cfg.save_dir, exist_ok=True)
@@ -230,14 +265,14 @@ def build_argparser():
     )
     p.add_argument(
         "--data_path", default=None,
-        help="optional dataset root containing fixed train/valid/test arrays; useful for folds",
+        help="optional dataset root containing source/test arrays; useful for folds",
     )
     p.add_argument("--finetune_type", default="dspt", choices=list(FINETUNE_TYPES))
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--batch_size", type=int, default=None)
     p.add_argument("--m", type=int, default=None, help="task-guidance prompt length")
-    p.add_argument("--r", type=int, default=None, help="rank of the calibration matrices")
+    p.add_argument("--r", type=int, default=None, help="rank of the sensor-embedding update")
     p.add_argument("--prompt_len", type=int, default=None, help="prompt length l of standard PT")
     p.add_argument("--alpha1", type=float, default=None, help="learning rate of the prompt")
     p.add_argument("--alpha2", type=float, default=None, help="learning rate of the low-rank pair")
@@ -313,5 +348,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
