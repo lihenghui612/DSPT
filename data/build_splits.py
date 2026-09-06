@@ -1,9 +1,9 @@
-"""Build paired, class-balanced few-shot support sets.
+"""Build paired, class-balanced few-shot support/validation splits.
 
-The canonical train/validation/test arrays must already exist under ``data/<dataset>``.
-For each requested split seed, this script samples exactly ``k`` training windows per
-class and stores them under ``<k>-shot/seed-<seed>``. Validation and test arrays remain
-at the dataset root and are never sampled or copied.
+The canonical source and test arrays must already exist under ``data/<dataset>``.
+For each requested seed, this script samples exactly ``k`` source windows per class
+as the training support set. Every remaining source window becomes validation data
+for that run. The held-out test arrays remain fixed at the dataset root.
 
 Examples
 --------
@@ -23,8 +23,7 @@ SEEDS = (0, 1, 2)
 
 def _validate_root(root, allow_unverified_root=False):
     required = (
-        "x_train.npy", "y_train.npy", "x_valid.npy", "y_valid.npy",
-        "x_test.npy", "y_test.npy",
+        "x_train.npy", "y_train.npy", "x_test.npy", "y_test.npy",
     )
     missing = [name for name in required if not os.path.isfile(os.path.join(root, name))]
     if missing:
@@ -61,6 +60,7 @@ def build(base_path, dataset, shots, seeds, allow_unverified_root=False):
 
     classes = np.unique(y)
     indices = {str(c): np.flatnonzero(y == c) for c in classes}
+    all_indices = np.arange(len(y), dtype=np.int64)
     smallest = min(len(v) for v in indices.values())
     print(
         f"\n{dataset}: {len(y)} training windows, {len(classes)} classes, "
@@ -85,10 +85,18 @@ def build(base_path, dataset, shots, seeds, allow_unverified_root=False):
                     [np.asarray(v, dtype=np.int64) for v in selected_by_class.values()]
                 )
             )
+            validation_mask = np.ones(len(y), dtype=bool)
+            validation_mask[support_idx] = False
+            validation_idx = all_indices[validation_mask]
+            if validation_idx.size == 0:
+                raise ValueError(
+                    f"seed {seed}, {k}-shot leaves no source windows for validation"
+                )
+
             out = os.path.join(root, f"{k}-shot", f"seed-{seed}")
             os.makedirs(out, exist_ok=True)
-            np.save(os.path.join(out, "x_train.npy"), np.ascontiguousarray(x[support_idx]))
-            np.save(os.path.join(out, "y_train.npy"), y[support_idx])
+            np.save(os.path.join(out, "train_indices.npy"), support_idx)
+            np.save(os.path.join(out, "valid_indices.npy"), validation_idx)
 
             manifest = {
                 "dataset": dataset,
@@ -97,7 +105,11 @@ def build(base_path, dataset, shots, seeds, allow_unverified_root=False):
                 "classes": [str(c) for c in classes],
                 "source": "x_train.npy/y_train.npy at the dataset root",
                 "support_indices_by_class": selected_by_class,
-                "validation": "fixed x_valid.npy/y_valid.npy at the dataset root",
+                "support_indices_file": "train_indices.npy",
+                "validation_indices_file": "valid_indices.npy",
+                "validation": (
+                    "all source indices not selected for this run's support set"
+                ),
                 "test": "fixed x_test.npy/y_test.npy at the dataset root",
             }
             with open(os.path.join(out, "split_manifest.json"), "w", encoding="utf-8") as f:
@@ -105,7 +117,7 @@ def build(base_path, dataset, shots, seeds, allow_unverified_root=False):
 
             print(
                 f"  seed {seed}, {k}-shot: {len(support_idx)} support windows "
-                f"({k} per class) -> {out}"
+                f"({k} per class), {len(validation_idx)} validation windows -> {out}"
             )
 
 

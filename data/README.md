@@ -23,10 +23,8 @@ array is sufficient to run the code but does not guarantee the published numbers
 ```text
 data/
 ├── MotionSense/
-│   ├── x_train.npy     [N_train, 500, 12]
-│   ├── y_train.npy     [N_train]
-│   ├── x_valid.npy     [N_valid, 500, 12]
-│   ├── y_valid.npy     [N_valid]
+│   ├── x_train.npy     [N_source, 500, 12]
+│   ├── y_train.npy     [N_source]
 │   ├── x_test.npy      [N_test, 500, 12]
 │   └── y_test.npy      [N_test]
 ├── HHAR/               same layout, 12 channels
@@ -41,18 +39,18 @@ the appropriate PyTorch types at runtime.
 
 The canonical benchmark partitions each continuous recording before generating any
 windows. This ordering prevents adjacent overlapping windows from sharing raw readings
-across the training, validation, and test sets.
+across the source and test sets.
 
 1. Assemble sensor axes in one fixed, documented channel order and retain the original
    temporal order within every continuous recording.
-2. Split each recording chronologically: the final 20% is held out for testing. From
-   the preceding 80% source interval, reserve its final 20% for validation.
-3. Generate windows independently inside each temporal partition. Each window contains
+2. Split each recording chronologically: use the first 80% as the source interval and
+   hold out the final 20% for testing.
+3. Generate windows independently inside the two temporal partitions. Each window contains
    500 readings and the stride is 250 readings (50% overlap).
 4. Discard windows that cross an activity transition. Because windowing is performed
    separately inside each partition, a window can never cross a partition boundary.
-5. Use one fixed set of root partitions for every method. Validation and test samples
-   are never used for gradient updates or few-shot support construction.
+5. Use one fixed source/test partition for every method. Test samples are never used
+   for gradient updates, validation, or few-shot support construction.
 6. Store raw sensor values. MOMENT applies reversible instance normalization inside
    the model.
 
@@ -78,11 +76,11 @@ python data/build_temporal_partitions.py \
   --input_root data/HHAR/continuous \
   --output_root data/HHAR \
   --win_len 500 --stride 250 \
-  --test_fraction 0.2 --validation_fraction 0.2
+  --test_fraction 0.2
 ```
 
 Repeat the command for MotionSense and PAMAP2. The script writes window-level recording
-identifiers and raw start/end indices in addition to the six canonical arrays. It also
+identifiers and raw start/end indices in addition to the four canonical arrays. It also
 writes `temporal_split_manifest.json`, which records the temporal boundary of every
 partition and certifies that splitting occurred before window generation.
 
@@ -102,9 +100,9 @@ The output layout is:
 
 ```text
 data/MotionSense/
-├── x_train.npy, y_train.npy, x_valid.npy, y_valid.npy, x_test.npy, y_test.npy
+├── x_train.npy, y_train.npy, x_test.npy, y_test.npy
 ├── 1-shot/
-│   ├── seed-0/x_train.npy, y_train.npy, split_manifest.json
+│   ├── seed-0/train_indices.npy, valid_indices.npy, split_manifest.json
 │   ├── seed-1/...
 │   └── seed-2/...
 ├── 5-shot/...
@@ -112,15 +110,17 @@ data/MotionSense/
 └── 20-shot/...
 ```
 
-For split seed `s`, exactly `K` windows per class are sampled from the fixed training
-partition. All compared methods use the same `seed-s` directory. Changing `s`
-resamples the support set. The same integer seed also initializes model training,
-which produces the paired protocol described in the paper. Validation and test arrays
-remain fixed at the dataset root and are never copied into the support directories.
+For split seed `s`, exactly `K` windows per class are sampled from the fixed source
+partition as the training support set. Every source window not selected for support
+forms that run's validation set. All compared methods use the same `seed-s` directory,
+so their support and validation indices are paired. Changing `s` resamples the support
+set and therefore changes its complementary validation set. The same integer seed also
+initializes model training. The held-out test arrays remain fixed at the dataset root.
 
-Each support directory contains `split_manifest.json`, including the source indices
-selected for every class. This makes the draw auditable once the canonical root arrays
-have been created.
+Each support directory contains `train_indices.npy`, `valid_indices.npy`, and
+`split_manifest.json`, including the source indices selected for every class. This
+makes both the support draw and its complementary validation set auditable once the
+canonical root arrays have been created, without duplicating the source arrays.
 
 ## HHAR cross-device and cross-subject protocols
 

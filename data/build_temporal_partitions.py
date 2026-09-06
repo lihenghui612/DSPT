@@ -1,8 +1,10 @@
-"""Build boundary-aware train/validation/test windows from continuous records.
+"""Build boundary-aware source/test windows from continuous records.
 
 The split is performed on each continuous recording before window generation.
-Windows are then created independently inside the three temporal partitions, so no
-raw reading or overlapping window can cross a partition boundary.
+Windows are then created independently inside the source and test partitions, so no
+raw reading or overlapping window can cross the source/test boundary. Few-shot
+support and validation sets are constructed later from the source windows by
+``build_splits.py``.
 
 Expected input arrays
 ---------------------
@@ -27,7 +29,7 @@ import os
 import numpy as np
 
 
-SPLITS = ("train", "valid", "test")
+SPLITS = ("train", "test")
 
 
 def _load(path):
@@ -58,16 +60,12 @@ def _recording_blocks(recording):
     return blocks
 
 
-def _temporal_ranges(start, end, test_fraction, validation_fraction):
-    """Split one recording into train/validation/test raw-index ranges."""
+def _temporal_ranges(start, end, test_fraction):
+    """Split one recording into disjoint source/test raw-index ranges."""
     length = end - start
     source_end = start + int(np.floor(length * (1.0 - test_fraction)))
-    source_length = source_end - start
-    valid_length = int(np.floor(source_length * validation_fraction))
-    valid_start = source_end - valid_length
     return {
-        "train": (start, valid_start),
-        "valid": (valid_start, source_end),
+        "train": (start, source_end),
         "test": (source_end, end),
     }
 
@@ -87,12 +85,9 @@ def _window_partition(x, y, rec, raw_start, raw_end, win_len, stride):
     return windows, labels, recordings, starts, ends
 
 
-def build(input_root, output_root, win_len=500, stride=250,
-          test_fraction=0.2, validation_fraction=0.2):
+def build(input_root, output_root, win_len=500, stride=250, test_fraction=0.2):
     if not 0 < test_fraction < 1:
         raise ValueError("test_fraction must be between 0 and 1")
-    if not 0 < validation_fraction < 1:
-        raise ValueError("validation_fraction must be between 0 and 1")
     if win_len <= 0 or stride <= 0:
         raise ValueError("win_len and stride must be positive")
 
@@ -116,7 +111,7 @@ def build(input_root, output_root, win_len=500, stride=250,
     manifest_records = []
 
     for rec, start, end in _recording_blocks(recording):
-        ranges = _temporal_ranges(start, end, test_fraction, validation_fraction)
+        ranges = _temporal_ranges(start, end, test_fraction)
         record_entry = {
             "recording": str(rec),
             "raw_start": start,
@@ -155,14 +150,16 @@ def build(input_root, output_root, win_len=500, stride=250,
                 np.asarray(part["end"], dtype=np.int64))
 
     manifest = {
-        "protocol": "chronological split before windowing",
+        "protocol": "chronological source/test split before windowing",
         "split_before_windowing": True,
         "raw_partitions_are_disjoint": True,
         "window_length": win_len,
         "stride": stride,
         "overlap_fraction": 1.0 - stride / win_len,
         "test_fraction_per_recording": test_fraction,
-        "validation_fraction_of_source": validation_fraction,
+        "few_shot_validation": (
+            "all source windows not selected for the run-specific K-shot support set"
+        ),
         "records": manifest_records,
         "window_counts": {
             split: len(collected[split]["x"]) for split in SPLITS
@@ -184,9 +181,5 @@ if __name__ == "__main__":
     parser.add_argument("--win_len", type=int, default=500)
     parser.add_argument("--stride", type=int, default=250)
     parser.add_argument("--test_fraction", type=float, default=0.2)
-    parser.add_argument(
-        "--validation_fraction", type=float, default=0.2,
-        help="fraction of the pre-test source interval reserved for validation",
-    )
     args = parser.parse_args()
     build(**vars(args))
