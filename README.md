@@ -72,7 +72,7 @@ compact and clearly separated activity clusters than FT-Head, LoRA, and Standard
 
 <p align="center"><em>
 Performance and efficiency under approximately matched input-adaptation budgets.
-The balanced configuration at $m=9$ delivers the best accuracy while reducing
+The balanced configuration at m = 9 delivers the best accuracy while reducing
 memory and training overhead relative to Standard PT.
 </em></p>
 
