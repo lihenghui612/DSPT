@@ -103,7 +103,13 @@ def main():
     p.add_argument("--dataset", default="MotionSense", choices=list(DATASETS))
     p.add_argument("--shot", default="5-shot")
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    p.add_argument(
+        "--support_seed", type=int, default=0,
+        help="fixed support-set seed shared across optimization runs",
+    )
     p.add_argument("--epochs", type=int, default=None)
+    p.add_argument("--model_path", default=None)
+    p.add_argument("--device", default=None)
     p.add_argument("--result_dir", default="results/ablation")
     args = p.parse_args()
 
@@ -116,10 +122,17 @@ def main():
             setattr(cfg, key, value)
         if args.epochs is not None:
             cfg.num_epochs = args.epochs
+        if args.model_path is not None:
+            cfg.model_path = args.model_path
+        if args.device is not None:
+            cfg.device = args.device
 
         print("\n" + "-" * 74)
         print(f"[{args.study}] {label}")
-        runs = [run_once(cfg, seed, verbose=False) for seed in args.seeds]
+        runs = [
+            run_once(cfg, seed, support_seed=args.support_seed, verbose=False)
+            for seed in args.seeds
+        ]
         entry = summarise(runs, label, override)
         table.append(entry)
         print(f"  accuracy {entry['acc_mean']:.2f} +/- {entry['acc_std']:.2f} | "

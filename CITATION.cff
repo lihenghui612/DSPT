@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the associated DSPT paper."
+title: "DSPT: Decomposed Sensor Prompt Tuning"
+type: software
+authors:
+  - family-names: Li
+    given-names: Henghui
+  - family-names: Fu
+    given-names: Zenan
+  - family-names: Liu
+    given-names: Xin
+  - family-names: Zhang
+    given-names: Lei
+  - family-names: Wu
+    given-names: Hao
+  - family-names: Song
+    given-names: Aiguo
+repository-code: "https://github.com/lihenghui612/DSPT"
+license: MIT

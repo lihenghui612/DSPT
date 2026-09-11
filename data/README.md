@@ -1,99 +1,104 @@
 # Data preparation and evaluation protocol
 
-## Why datasets are not included
+This directory defines the stable interface between dataset-specific raw-file
+parsing and DSPT training. The datasets themselves are not redistributed.
 
-MotionSense, HHAR, and PAMAP2 are public third-party datasets. Their raw archives
-and processed derivatives are intentionally not redistributed here; users should
-obtain them from the original providers and comply with the applicable terms.
+## Official dataset sources
 
-| Dataset | Source | Channels used | Classes | Subjects |
+| Dataset | Source | Channels | Classes | Subjects |
 | --- | --- | ---: | ---: | ---: |
-| MotionSense | https://github.com/mmalekzadeh/motion-sense | 12 | 6 | 24 |
-| HHAR | https://archive.ics.uci.edu/dataset/344/heterogeneity+activity+recognition | 12 | 6 | 9 |
-| PAMAP2 | https://archive.ics.uci.edu/dataset/231/pamap2+physical+activity+monitoring | 36 | 12 | 9 |
+| MotionSense | [Official repository](https://github.com/mmalekzadeh/motion-sense) | 12 | 6 | 24 |
+| HHAR | [UCI repository](https://archive.ics.uci.edu/dataset/344/heterogeneity+activity+recognition) | 12 | 6 | 9 |
+| PAMAP2 | [UCI repository](https://archive.ics.uci.edu/dataset/231/pamap2+physical+activity+monitoring) | 36 | 12 | 9 |
 
-The repository defines a stable NumPy interface between dataset-specific raw-file
-parsing and model training. Exact reproduction requires using the same channel order,
-class mapping, filtering rules, and fixed partition indices as the paper. These items
-should be recorded when the canonical arrays are created; a merely shape-compatible
-array is sufficient to run the code but does not guarantee the published numbers.
+Users must download each dataset from its original provider and comply with the
+applicable terms.
 
-## Canonical array interface
+## Required continuous-data interface
 
-```text
-data/
-├── MotionSense/
-│   ├── x_train.npy     [N_source, 500, 12]
-│   ├── y_train.npy     [N_source]
-│   ├── x_test.npy      [N_test, 500, 12]
-│   └── y_test.npy      [N_test]
-├── HHAR/               same layout, 12 channels
-└── PAMAP2/             same layout, 36 channels
-```
-
-`x_*` must use `[window, time, channel]` order. `y_*` contains integer labels in
-`[0, num_classes)`. `float32` and `int64` are recommended. The loader casts arrays to
-the appropriate PyTorch types at runtime.
-
-## Temporal partitioning and windowing
-
-The canonical benchmark partitions each continuous recording before generating any
-windows. This ordering prevents adjacent overlapping windows from sharing raw readings
-across the source and test sets.
-
-1. Assemble sensor axes in one fixed, documented channel order and retain the original
-   temporal order within every continuous recording.
-2. Split each recording chronologically: use the first 80% as the source interval and
-   hold out the final 20% for testing.
-3. Generate windows independently inside the two temporal partitions. Each window contains
-   500 readings and the stride is 250 readings (50% overlap).
-4. Discard windows that cross an activity transition. Because windowing is performed
-   separately inside each partition, a window can never cross a partition boundary.
-5. Use one fixed source/test partition for every method. Test samples are never used
-   for gradient updates, validation, or few-shot support construction.
-6. Store raw sensor values. MOMENT applies reversible instance normalization inside
-   the model.
-
-The same participant or recording session may contribute temporally disjoint portions
-to more than one partition, so this remains an in-domain evaluation. However, the
-partitions share neither raw timestamps nor overlapping windows. Unseen-device and
-unseen-subject generalization are evaluated separately by the HHAR group-exclusive
-protocols below.
-
-Prepare per-reading continuous arrays under, for example,
-`data/HHAR/continuous/`:
+After dataset-specific parsing, place the following per-reading arrays under
+`data/<dataset>/continuous/`:
 
 ```text
-x.npy           [T, C] raw readings in recording-time order
-y.npy           [T] per-reading activity labels
-recording.npy   [T] continuous-recording identifiers
+x.npy           [T, C]  raw sensor readings in a fixed channel order
+y.npy           [T]     integer activity label for every reading
+subject.npy     [T]     subject identifier for every reading
+recording.npy   [T]     continuous-recording identifier for every reading
 ```
 
-Then create the canonical root arrays and an auditable temporal-boundary manifest:
+For HHAR cross-domain evaluation, also provide:
+
+```text
+device.npy      [T]     sensing-device-model identifier for every reading
+```
+
+Requirements:
+
+1. Each recording identifier must form one contiguous block.
+2. A recording must map to exactly one subject and, when provided, one device model.
+3. Samples inside every recording must preserve their original temporal order.
+4. `y.npy` must use labels in `[0, num_classes)`.
+5. Raw sensor values should be stored without test-set normalization; MOMENT applies
+   reversible instance normalization inside the model.
+
+Exact numerical reproduction additionally requires the same channel order, class
+mapping, filtering rules, and fixed subject partition used in the paper. These
+dataset-specific choices should be documented when the continuous arrays are created.
+
+## Subject-disjoint split before windowing
+
+The main evaluation first partitions participants into disjoint source and test sets,
+with approximately 80% of the subjects assigned to the source set and the remaining
+subjects held out for testing. Windowing is performed only after this subject-level
+assignment.
+
+For exact reproduction, pass the fixed held-out subject identifiers explicitly:
 
 ```bash
-python data/build_temporal_partitions.py \
+python data/build_subject_partitions.py \
   --input_root data/HHAR/continuous \
   --output_root data/HHAR \
-  --win_len 500 --stride 250 \
-  --test_fraction 0.2
+  --test_subjects SUBJECT_A SUBJECT_B \
+  --win_len 500 \
+  --stride 250
 ```
 
-Repeat the command for MotionSense and PAMAP2. The script writes window-level recording
-identifiers and raw start/end indices in addition to the four canonical arrays. It also
-writes `temporal_split_manifest.json`, which records the temporal boundary of every
-partition and certifies that splitting occurred before window generation.
+If `--test_subjects` is omitted, the script generates a deterministic approximately
+80/20 subject split using `--split_seed 2026`. This is useful for validating the
+pipeline, but exact paper reproduction requires the canonical held-out IDs.
 
-## Paired few-shot support sets
+The script:
 
-Generate the three class-balanced support-set draws after the boundary-aware root
-partitions have been prepared:
+- assigns each complete subject to source or test before window generation;
+- generates 500-reading windows separately inside each continuous recording;
+- uses a stride of 250 readings (50% overlap);
+- discards windows that cross an activity transition;
+- writes the following canonical arrays:
+
+```text
+data/HHAR/
+├── x_train.npy, y_train.npy
+├── x_test.npy, y_test.npy
+├── subject_train.npy, subject_test.npy
+├── recording_train.npy, recording_test.npy
+├── start_train.npy, end_train.npy
+├── start_test.npy, end_test.npy
+└── subject_split_manifest.json
+```
+
+`subject_split_manifest.json` records the source/test subject IDs, raw recording
+boundaries, window settings, and generated sample counts.
+
+## Class-balanced few-shot supports
+
+After the fixed subject-disjoint root arrays have been created, generate the support
+and validation indices:
 
 ```bash
 python data/build_splits.py \
   --datasets MotionSense HHAR PAMAP2 \
   --shots 1 5 10 20 \
-  --seeds 0 1 2
+  --support_seeds 0 1 2
 ```
 
 The output layout is:
@@ -102,58 +107,82 @@ The output layout is:
 data/MotionSense/
 ├── x_train.npy, y_train.npy, x_test.npy, y_test.npy
 ├── 1-shot/
-│   ├── seed-0/train_indices.npy, valid_indices.npy, split_manifest.json
-│   ├── seed-1/...
-│   └── seed-2/...
+│   ├── support-seed-0/
+│   │   ├── train_indices.npy
+│   │   ├── valid_indices.npy
+│   │   └── split_manifest.json
+│   ├── support-seed-1/...
+│   └── support-seed-2/...
 ├── 5-shot/...
 ├── 10-shot/...
 └── 20-shot/...
 ```
 
-For split seed `s`, exactly `K` windows per class are sampled from the fixed source
-partition as the training support set. Every source window not selected for support
-forms that run's validation set. All compared methods use the same `seed-s` directory,
-so their support and validation indices are paired. Changing `s` resamples the support
-set and therefore changes its complementary validation set. The same integer seed also
-initializes model training. The held-out test arrays remain fixed at the dataset root.
+For every support seed and every `K`:
 
-Each support directory contains `train_indices.npy`, `valid_indices.npy`, and
-`split_manifest.json`, including the source indices selected for every class. This
-makes both the support draw and its complementary validation set auditable once the
-canonical root arrays have been created, without duplicating the source arrays.
+- exactly `K` source windows per class form the support set;
+- all remaining source windows form the validation set;
+- support and validation indices are shared by every compared method;
+- the held-out test partition remains unchanged.
 
-## HHAR cross-device and cross-subject protocols
+## Two repeated-run protocols
 
-The domain-exclusive experiments require recording-aware metadata before the fold
-split is constructed. Prepare the following arrays under `data/HHAR/domain_metadata/`:
+### Main tables and figures: fixed support
 
-```text
-x.npy              [N, 500, 12]
-y.npy              [N]
-device.npy         [N] device-model identifier for each window
-subject.npy        [N] participant identifier for each window
-recording.npy      [N] continuous-recording identifier for each window
-```
-
-All windows originating from one continuous recording must have the same device and
-subject identifiers. Create the leave-one-group-out folds with:
+The main results keep one class-balanced support set fixed across three runs and vary
+only initialization and optimization randomness:
 
 ```bash
-python data/build_group_splits.py --axis device --seeds 0 1 2
-python data/build_group_splits.py --axis subject --seeds 0 1 2
+python train.py --dataset HHAR --shot 5-shot --finetune_type dspt \
+  --support_seed 0 --seeds 0 1 2
 ```
 
-For each fold, every window from the held-out group is used only for testing. Source
-groups are divided into training and validation subsets, and few-shot supports are
-sampled only from the source training subset. The script validates that a recording
-does not map to multiple values of the held-out grouping variable. Consequently, no
-recording can cross the source/test boundary.
+The resulting sample standard deviation therefore measures initialization and
+optimization variability under a fixed support set.
 
-The two protocols test different shifts:
+### Separate robustness analysis: varied support
 
-- Cross-device holds out an entire device model; subjects may still overlap.
-- Cross-subject holds out an entire participant; device models may still overlap.
+The support-set robustness experiment varies the support selection while holding the
+initialization and optimization seed fixed:
 
-Neither result should be described as explicit conditioning on device or participant
-metadata. It evaluates whether the learned sensor-embedding adaptation remains useful
-under a domain-exclusive shift.
+```bash
+python support_sampling.py --dataset HHAR --shot 5-shot --finetune_type dspt \
+  --support_seeds 0 1 2 --optimization_seed 0
+```
+
+Its sample standard deviation therefore characterizes support-set selection
+variability. Do not mix these two uncertainty definitions when reporting results.
+
+## HHAR cross-domain protocols
+
+The cross-domain experiments assign the held-out device model or participant before
+generating windows. Use the same per-reading arrays under `data/HHAR/continuous/` and
+run:
+
+```bash
+python data/build_group_splits.py --axis device  --shots 5 10 --support_seeds 0 1 2
+python data/build_group_splits.py --axis subject --shots 5 10 --support_seeds 0 1 2
+```
+
+The two protocols isolate complementary shifts:
+
+- **Cross-device:** all recordings from one sensing-device model are held out for
+  testing; participants may appear in both source and test domains.
+- **Cross-subject:** all recordings from one participant are held out for testing;
+  device models may appear in both source and test domains.
+
+Within every fold, validation data are drawn only from source-domain windows. The
+builders write fold and support manifests so the group assignment and every support
+set can be audited.
+
+Generated fold roots can be passed directly to `train.py`:
+
+```bash
+python train.py \
+  --dataset HHAR \
+  --data_path data/HHAR/cross-device/fold-0-LG-Nexus-4 \
+  --shot 5-shot \
+  --finetune_type dspt \
+  --support_seed 0 \
+  --seeds 0 1 2
+```

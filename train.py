@@ -3,7 +3,8 @@
 Examples
 --------
     python train.py --dataset MotionSense --shot 5-shot --finetune_type dspt
-    python train.py --dataset PAMAP2 --shot 1-shot --finetune_type std_pt --seeds 0 1 2
+    python train.py --dataset PAMAP2 --shot 1-shot --finetune_type std_pt \
+      --support_seed 0 --seeds 0 1 2
 """
 import argparse
 import json
@@ -96,22 +97,22 @@ def safe_tag(value):
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-")
 
 
-def data_paths_for_run(cfg, seed):
-    """Return the run-specific data directory and its fixed dataset root.
+def data_paths_for_run(cfg, support_seed):
+    """Return the fixed-support directory and its dataset root.
 
-    Few-shot runs use ``<dataset>/<k>-shot/seed-<seed>`` so that a run seed controls
-    both the support-set draw and optimization randomness. Fully supervised runs use
-    the fixed dataset root.
+    Main few-shot runs use one ``support-seed`` directory across all optimization
+    seeds. Fully supervised runs use the complete fixed source partition.
     """
     if cfg.shot == "full":
         return cfg.data_path, cfg.data_path
 
     dataset_root = os.path.dirname(cfg.data_path)
-    run_path = os.path.join(cfg.data_path, f"seed-{seed}")
+    run_path = os.path.join(cfg.data_path, f"support-seed-{support_seed}")
     if not os.path.isdir(run_path):
         raise FileNotFoundError(
             f"Missing paired support set: {run_path}. Run data/build_splits.py "
-            f"with --shots {cfg.shot.removesuffix('-shot')} --seeds {seed}."
+            f"with --shots {cfg.shot.removesuffix('-shot')} "
+            f"--support_seeds {support_seed}."
         )
     return run_path, dataset_root
 
@@ -145,17 +146,18 @@ def evaluate(model, loader, device, detailed=False):
     }
 
 
-def run_once(cfg, seed, verbose=True):
+def run_once(cfg, seed, support_seed=0, verbose=True):
     """Train one model and evaluate it on the test split.
 
-    For few-shot runs, the best epoch is selected on the run-specific complementary
-    validation split. Fully supervised runs use all source windows for the configured
-    number of epochs. In both cases, the held-out test split is evaluated once.
+    ``seed`` controls initialization and optimization. ``support_seed`` independently
+    selects the class-balanced support set, which remains fixed across the main three
+    runs. For few-shot runs, the best epoch is selected on the complementary source
+    validation split. The held-out test split is evaluated once.
     """
     set_seed(seed)
     device = torch.device(cfg.device)
 
-    run_data_path, dataset_root = data_paths_for_run(cfg, seed)
+    run_data_path, dataset_root = data_paths_for_run(cfg, support_seed)
     train_set = WindowDataset(run_data_path, "train", dataset_root)
     valid_set = None if cfg.shot == "full" else WindowDataset(
         run_data_path, "valid", dataset_root
@@ -238,13 +240,20 @@ def run_once(cfg, seed, verbose=True):
         os.makedirs(cfg.save_dir, exist_ok=True)
         keys = {n for n, p in model.named_parameters() if p.requires_grad}
         torch.save(
-            {"cfg": cfg.__dict__, "seed": seed,
+            {"cfg": cfg.__dict__, "optimization_seed": seed,
+             "support_seed": None if cfg.shot == "full" else support_seed,
              "state_dict": {k: v for k, v in best_state.items() if k in keys}},
-            os.path.join(cfg.save_dir, f"{cfg.dataset}_{cfg.shot}_{cfg.finetune_type}_s{seed}.pth"),
+            os.path.join(
+                cfg.save_dir,
+                f"{cfg.dataset}_{cfg.shot}_{cfg.finetune_type}"
+                f"_support{support_seed}_opt{seed}.pth",
+            ),
         )
 
     return {
         "seed": seed,
+        "optimization_seed": seed,
+        "support_seed": None if cfg.shot == "full" else support_seed,
         "data_path": run_data_path,
         "best_valid": best_valid,
         "best_epoch": best_epoch,
@@ -267,8 +276,17 @@ def build_argparser():
         "--data_path", default=None,
         help="optional dataset root containing source/test arrays; useful for folds",
     )
+    p.add_argument("--data_root", default=None, help="base directory containing datasets")
+    p.add_argument("--model_path", default=None, help="local MOMENT-SMALL directory")
+    p.add_argument("--device", default=None, help="PyTorch device, for example cuda or cpu")
+    p.add_argument("--num_workers", type=int, default=None)
+    p.add_argument("--result_dir", default=None)
     p.add_argument("--finetune_type", default="dspt", choices=list(FINETUNE_TYPES))
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    p.add_argument(
+        "--support_seed", type=int, default=0,
+        help="fixed support-set seed shared by all optimization runs",
+    )
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--batch_size", type=int, default=None)
     p.add_argument("--m", type=int, default=None, help="task-guidance prompt length")
@@ -284,11 +302,18 @@ def build_argparser():
 
 def config_from_args(args):
     cfg = Config(dataset=args.dataset, shot=args.shot, finetune_type=args.finetune_type)
+    if args.data_root is not None:
+        cfg.data_root = os.path.abspath(args.data_root)
+        cfg.data_path = os.path.join(cfg.data_root, args.dataset)
+        if args.shot != "full":
+            cfg.data_path = os.path.join(cfg.data_path, args.shot)
     if args.data_path is not None:
         root = os.path.abspath(args.data_path)
         cfg.data_path = root if args.shot == "full" else os.path.join(root, args.shot)
     overrides = {"epochs": "num_epochs", "batch_size": "batch_size", "m": "m", "r": "r",
-                 "prompt_len": "prompt_len", "alpha1": "alpha1", "alpha2": "alpha2"}
+                 "prompt_len": "prompt_len", "alpha1": "alpha1", "alpha2": "alpha2",
+                 "model_path": "model_path", "device": "device",
+                 "num_workers": "num_workers", "result_dir": "result_dir"}
     for arg_name, cfg_name in overrides.items():
         value = getattr(args, arg_name)
         if value is not None:
@@ -307,7 +332,11 @@ def main():
     print("=" * 74)
     print(f"{cfg.dataset} | {cfg.shot} | {cfg.finetune_type}")
     print(f"data {cfg.data_path} | channels {cfg.n_channels} | classes {cfg.num_class}")
-    print(f"epochs {cfg.num_epochs} | batch size {cfg.batch_size} | seeds {args.seeds}")
+    print(
+        f"epochs {cfg.num_epochs} | batch size {cfg.batch_size} | "
+        f"optimization seeds {args.seeds} | "
+        f"support seed {args.support_seed if cfg.shot != 'full' else 'n/a'}"
+    )
     print(f"budget: standard PT (l={cfg.prompt_len}) {n_pt:,} vs "
           f"DSPT (m={cfg.m}, r={cfg.r}) {n_dspt:,} | difference {gap:.1%}")
     print(f"dual learning rates {cfg.dual_lr} | alpha1 {cfg.alpha1} | alpha2 {cfg.alpha2} | "
@@ -316,8 +345,8 @@ def main():
 
     results = []
     for seed in args.seeds:
-        print(f"\n[seed {seed}]")
-        results.append(run_once(cfg, seed))
+        print(f"\n[optimization seed {seed}]")
+        results.append(run_once(cfg, seed, support_seed=args.support_seed))
 
     acc = np.array([r["test_acc"] for r in results])
     f1 = np.array([r["test"]["macro_f1"] for r in results])
@@ -335,13 +364,21 @@ def main():
         normalized = os.path.normpath(os.path.abspath(args.data_path))
         parent, leaf = os.path.basename(os.path.dirname(normalized)), os.path.basename(normalized)
         tag = f"{parent}_{leaf}"
+    support_tag = f"_support{args.support_seed}" if cfg.shot != "full" else ""
     suffix = f"_{safe_tag(tag)}" if tag else ""
     path = os.path.join(cfg.result_dir,
-                        f"{cfg.dataset}_{cfg.shot}_{cfg.finetune_type}{suffix}.json")
+                        f"{cfg.dataset}_{cfg.shot}_{cfg.finetune_type}"
+                        f"{support_tag}{suffix}.json")
     with open(path, "w") as f:
         json.dump({"config": cfg.__dict__, "runs": results,
                    "acc_mean": float(acc.mean()), "acc_std": acc_std,
                    "f1_mean": float(f1.mean()), "f1_std": f1_std,
+                   "protocol": (
+                       "fixed support set across optimization runs"
+                       if cfg.shot != "full" else "complete source set"
+                   ),
+                   "support_seed": None if cfg.shot == "full" else args.support_seed,
+                   "optimization_seeds": args.seeds,
                    "std_definition": "sample standard deviation (ddof=1)"}, f, indent=2)
     print(f"results written to {path}")
 

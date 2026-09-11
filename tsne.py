@@ -15,10 +15,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from config import Config, DATASETS, FINETUNE_TYPES
-from train import WindowDataset
+from train import WindowDataset, data_paths_for_run
 
 
-def extract_features(cfg, ckpt_path, device):
+def extract_features(cfg, ckpt_path, device, support_seed):
     from model import MomentHAR
 
     model = MomentHAR(cfg).to(device).eval()
@@ -30,8 +30,13 @@ def extract_features(cfg, ckpt_path, device):
         raise FileNotFoundError(
             f"{ckpt_path} not found; run train.py with --save_ckpt first")
 
-    loader = DataLoader(WindowDataset(cfg.data_path, "test"), batch_size=64,
-                        shuffle=False, num_workers=cfg.num_workers)
+    run_path, dataset_root = data_paths_for_run(cfg, support_seed)
+    loader = DataLoader(
+        WindowDataset(run_path, "test", dataset_root),
+        batch_size=64,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+    )
     features, labels = [], []
     for x, y in loader:
         features.append(model.get_features(x.to(device)).cpu().numpy())
@@ -46,7 +51,10 @@ def main():
     p.add_argument("--finetune_type", nargs="+", default=["ft_head", "lora", "dspt"],
                    choices=list(FINETUNE_TYPES))
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--support_seed", type=int, default=0)
     p.add_argument("--ckpt_dir", default="checkpoints")
+    p.add_argument("--model_path", default=None)
+    p.add_argument("--device", default=None)
     p.add_argument("--perplexity", type=float, default=30.0)
     p.add_argument("--out", default="results/tsne.png")
     args = p.parse_args()
@@ -56,7 +64,9 @@ def main():
     import matplotlib.pyplot as plt
     from sklearn.manifold import TSNE
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     n = len(args.finetune_type)
     fig, axes = plt.subplots(1, n, figsize=(4.8 * n, 4.6))
     axes = np.atleast_1d(axes)
@@ -64,9 +74,14 @@ def main():
     for ax, finetune_type in zip(axes, args.finetune_type):
         print(f"[{finetune_type}]")
         cfg = Config(dataset=args.dataset, shot=args.shot, finetune_type=finetune_type)
+        if args.model_path is not None:
+            cfg.model_path = args.model_path
         ckpt = os.path.join(
-            args.ckpt_dir, f"{args.dataset}_{args.shot}_{finetune_type}_s{args.seed}.pth")
-        features, labels = extract_features(cfg, ckpt, device)
+            args.ckpt_dir,
+            f"{args.dataset}_{args.shot}_{finetune_type}"
+            f"_support{args.support_seed}_opt{args.seed}.pth",
+        )
+        features, labels = extract_features(cfg, ckpt, device, args.support_seed)
         embedded = TSNE(n_components=2, perplexity=args.perplexity, init="pca",
                         random_state=args.seed).fit_transform(features)
         for label in np.unique(labels):
@@ -87,4 +102,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

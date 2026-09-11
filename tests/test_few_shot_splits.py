@@ -23,9 +23,15 @@ class FewShotSplitTest(unittest.TestCase):
             np.save(os.path.join(root, "x_test.npy"), x_train[:3])
             np.save(os.path.join(root, "y_test.npy"), y_train[:3])
 
-            build(base, "HHAR", shots=[2], seeds=[7], allow_unverified_root=True)
+            build(
+                base,
+                "HHAR",
+                shots=[2],
+                support_seeds=[7],
+                allow_unverified_root=True,
+            )
 
-            run = os.path.join(root, "2-shot", "seed-7")
+            run = os.path.join(root, "2-shot", "support-seed-7")
             support = np.load(os.path.join(run, "train_indices.npy"))
             validation = np.load(os.path.join(run, "valid_indices.npy"))
 
